@@ -12,11 +12,15 @@ web form, even a local one.
 
 from __future__ import annotations
 
+import asyncio
+import json
+import logging
 import sqlite3
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from . import pipeline, storage
@@ -26,6 +30,33 @@ from .dashboard import _CSS, compute_stats
 app = FastAPI(title="osmos")
 
 _COOKIES_FILE = Path("cookies.json")
+
+# Loggers worth surfacing to the Run tab's live log panel — the ones that
+# actually narrate what's happening (tier escalation, retries, login steps),
+# not the whole Python logging tree.
+_STREAM_LOGGER_LEVELS = {
+    "osmos_core": logging.DEBUG,
+    "aiograpi": logging.INFO,
+    "private_request": logging.INFO,
+    "httpx": logging.INFO,
+}
+
+
+class _QueueLogHandler(logging.Handler):
+    """Pushes formatted log records into an asyncio.Queue instead of stderr.
+
+    ponytail: one handler set is shared by every concurrent /api/run/stream
+    call (these loggers are process-wide), so two simultaneous runs would see
+    each other's lines. Fine for a single-user localhost tool; add per-run
+    logger names if this ever needs to support concurrent users.
+    """
+
+    def __init__(self, queue: asyncio.Queue[dict]) -> None:
+        super().__init__()
+        self.queue = queue
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.queue.put_nowait({"level": record.levelname, "message": self.format(record)})
 
 
 def _db() -> sqlite3.Connection:
@@ -112,6 +143,60 @@ async def run(body: RunRequest) -> dict:
     return {"collected": collected, "total": len(body.usernames), "classified": classified}
 
 
+@app.post("/api/run/stream")
+async def run_stream(body: RunRequest) -> StreamingResponse:
+    """Same as /api/run, but narrates every request as it happens.
+
+    Server-Sent Events over a POST body (native EventSource is GET-only) —
+    the browser reads this with fetch() + a manual stream reader instead.
+    """
+    if not body.usernames:
+        raise HTTPException(400, "no usernames given")
+
+    async def events() -> AsyncIterator[str]:
+        queue: asyncio.Queue[dict] = asyncio.Queue()
+        handler = _QueueLogHandler(queue)
+        handler.setLevel(logging.DEBUG)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        loggers = [logging.getLogger(name) for name in _STREAM_LOGGER_LEVELS]
+        previous_levels = [lg.level for lg in loggers]
+        for lg, level in zip(loggers, _STREAM_LOGGER_LEVELS.values(), strict=True):
+            lg.addHandler(handler)
+            lg.setLevel(level)
+
+        async def run_pipeline() -> None:
+            try:
+                conn = _db()
+                collected = await pipeline.run_collect(conn, body.usernames, posts_limit=body.posts)
+                classified = await pipeline.run_classify(conn)
+                await queue.put(
+                    {
+                        "type": "done",
+                        "collected": collected,
+                        "total": len(body.usernames),
+                        "classified": classified,
+                    }
+                )
+            except Exception as exc:  # surfaced to the browser, not swallowed
+                await queue.put({"type": "error", "message": str(exc)})
+
+        task = asyncio.create_task(run_pipeline())
+        try:
+            while True:
+                item = await queue.get()
+                yield f"data: {json.dumps(item)}\n\n"
+                if item.get("type") in ("done", "error"):
+                    break
+        finally:
+            for lg, level in zip(loggers, previous_levels, strict=True):
+                lg.removeHandler(handler)
+                lg.setLevel(level)
+            if not task.done():
+                task.cancel()
+
+    return StreamingResponse(events(), media_type="text/event-stream")
+
+
 @app.get("/api/discover")
 def discover(min_mentions: int = 2, limit: int = 30) -> dict:
     conn = _db()
@@ -166,6 +251,15 @@ button:disabled { opacity: 0.6; cursor: default; }
 .skeleton-row td { padding: 10px 8px; }
 .skeleton-bar { height: 13px; border-radius: 4px; }
 .kpi .value.skeleton { height: 26px; width: 48px; display: inline-block; }
+
+#run-log { margin-top: 12px; max-height: 260px; overflow-y: auto; background: #1c1c1a;
+  border-radius: 8px; padding: 10px 12px; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px; line-height: 1.6; }
+#run-log[hidden] { display: none; }
+.log-line { white-space: pre-wrap; word-break: break-all; color: #d4d3cb; }
+.log-line.log-debug { color: #7d7c74; }
+.log-line.log-warning { color: #e8b339; }
+.log-line.log-error { color: #e85d4f; }
 """
 )
 
@@ -233,6 +327,7 @@ _PAGE_HTML = f"""<!DOCTYPE html>
         <button type="button" class="btn-secondary" id="classify-only-btn">Classify pending only</button>
       </form>
       <div id="run-output"></div>
+      <pre id="run-log" hidden></pre>
     </div>
     <div class="card">
       <h2>Discover more usernames</h2>
@@ -370,22 +465,59 @@ function setRunStatus(out, text, spinning) {{
   }}
 }}
 
+function appendLogLine(logEl, item) {{
+  const line = document.createElement("div");
+  line.className = "log-line log-" + item.level.toLowerCase();
+  line.textContent = item.message;
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
+}}
+
+async function runWithLogStream(usernames, posts, logEl) {{
+  logEl.hidden = false;
+  logEl.innerHTML = "";
+  const response = await fetch("/api/run/stream", {{
+    method: "POST", headers: {{"Content-Type": "application/json"}},
+    body: JSON.stringify({{usernames: usernames, posts: posts}}),
+  }});
+  if (!response.ok) {{
+    const data = await response.json().catch(function () {{ return {{}}; }});
+    throw new Error(data.detail || "request failed");
+  }}
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let result = null;
+  while (true) {{
+    const chunk = await reader.read();
+    if (chunk.done) break;
+    buffer += decoder.decode(chunk.value, {{stream: true}});
+    const parts = buffer.split("\\n\\n");
+    buffer = parts.pop();
+    for (const part of parts) {{
+      if (!part.startsWith("data: ")) continue;
+      const item = JSON.parse(part.slice(6));
+      if (item.type === "done" || item.type === "error") {{ result = item; }}
+      else {{ appendLogLine(logEl, item); }}
+    }}
+  }}
+  if (!result) throw new Error("stream ended without a result");
+  if (result.type === "error") throw new Error(result.message);
+  return result;
+}}
+
 document.getElementById("run-form").addEventListener("submit", async function (e) {{
   e.preventDefault();
   const usernames = parseUsernames(document.getElementById("usernames-input").value);
   const posts = parseInt(document.getElementById("posts-input").value, 10) || 12;
   const out = document.getElementById("run-output");
+  const logEl = document.getElementById("run-log");
   const btn = e.target.querySelector("button[type=submit]");
   if (!usernames.length) {{ setRunStatus(out, "Enter at least one username first.", false); return; }}
   btn.disabled = true; btn.textContent = "Running…";
   setRunStatus(out, "Collecting " + usernames.length + " profile(s) — this talks to Instagram, can take a while…", true);
   try {{
-    const r = await fetch("/api/run", {{
-      method: "POST", headers: {{"Content-Type": "application/json"}},
-      body: JSON.stringify({{usernames: usernames, posts: posts}}),
-    }});
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.detail || "request failed");
+    const data = await runWithLogStream(usernames, posts, logEl);
     setRunStatus(out, "Collected " + data.collected + "/" + data.total + ". Classified " + data.classified + ".", false);
   }} catch (err) {{
     setRunStatus(out, "Error: " + err.message, false);

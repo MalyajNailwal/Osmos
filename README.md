@@ -64,8 +64,9 @@ tests); see `osmos-core/README.md` for its architecture and
 
 ![Setup tab](docs/screenshots/setup.png)
 
-**Run** — paste usernames, hit go; a live status line (not just a disabled
-button) while it talks to Instagram:
+**Run** — paste usernames, hit go; a live log streams every request as it
+happens (login, profile fetch, posts, the OpenRouter classify call), not
+just a spinner:
 
 ![Run tab](docs/screenshots/run.png)
 
