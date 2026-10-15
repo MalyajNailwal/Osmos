@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "osmos"
+version = "0.1.0"
+description = "PoC: collect Instagram influencer profiles and classify them into content niches."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "osmos-core",
+    "httpx>=0.28",
+    "pydantic>=2.10",
+    "pydantic-settings>=2.6",
+    "typer>=0.15",
+    "rich>=14.0",
+    "fastapi>=0.115",
+    "uvicorn>=0.32",
+    # Real private-API login (accounts/login/), used only when
+    # INSTAGRAM_USERNAME/PASSWORD are configured. osmos-core's own transport
+    # ladder tops out at pasted-cookie auth, which Instagram treats as a
+    # weaker signal than a genuine logged-in session — see collector.py.
+    "aiograpi>=2.0.20",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3", "pytest-asyncio>=0.25"]
+# Last-resort transport tier for when the anonymous/impersonated tiers get
+# throttled (common from shared or datacenter IPs). Heavy (~300MB: Chromium +
+# a stealth launcher) and off by default, matching osmos-core's own stance —
+# install only if `osmos collect` starts failing with "require_login" errors.
+browser = ["osmos-core[browser]"]
+
+[project.scripts]
+osmos = "osmos.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.uv.sources]
+# Vendored, not an external dependency: osmos-core is the scraping engine
+# this project is built on (originally the MIT-licensed 'instadata',
+# github.com/schiz0x00/instadata — renamed, patched, see osmos-core/README.md),
+# living at ./osmos-core so `git clone` + `uv sync` is the entire setup for
+# anyone, forever, no external repo to fetch or keep in sync.
+#
+# editable=true matters: without it uv builds and *copies* osmos-core into
+# the venv once, so source edits here silently don't take effect until a
+# manual reinstall — cost real time tracking down on 2026-10-15.
+osmos-core = { path = "osmos-core", editable = true }
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]

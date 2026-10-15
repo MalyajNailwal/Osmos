@@ -1,0 +1,12 @@
+# One username per line (with or without @). Lines starting with # are ignored.
+# A small, deliberately diverse demo seed list — all verified brand/media accounts.
+nasa
+natgeo
+nike
+tasty
+gordonramsay
+lonelyplanet
+apple
+espn
+voguemagazine
+dogsofinstagram

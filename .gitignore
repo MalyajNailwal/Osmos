@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+.playwright-mcp/
+*.db
+.env
+cookies*.txt
+cookies*.json
+ig_session*.json
+dashboard.html
+.ruff_cache/
+.pytest_cache/
+*.egg-info/
