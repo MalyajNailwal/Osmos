@@ -24,7 +24,11 @@ jobs:
           enable-cache: true
 
       - name: Install
-        run: uv sync --extra dev
+        # --python pinned, not left to uv's default "newest available": uv
+        # otherwise picks 3.15, too new for pydantic-core's prebuilt wheels —
+        # forces a source build that fails (PyO3 doesn't support 3.15 yet).
+        # 3.13 matches pyproject's declared floor.
+        run: uv sync --extra dev --python 3.13
 
       - name: Test
         run: uv run pytest
