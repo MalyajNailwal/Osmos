@@ -58,6 +58,22 @@ separate codebase inside this one on purpose (own `pyproject.toml`, own
 tests); see `osmos-core/README.md` for its architecture and
 `osmos-core/LICENSE` for its terms.
 
+## Screenshots
+
+**Setup** — status badges for every auth path, all live-verified configured:
+
+![Setup tab](docs/screenshots/setup.png)
+
+**Run** — paste usernames, hit go; a live status line (not just a disabled
+button) while it talks to Instagram:
+
+![Run tab](docs/screenshots/run.png)
+
+**Dashboard** — category breakdown, sortable/filterable table, click any
+reasoning cell to read the full explanation:
+
+![Dashboard tab](docs/screenshots/dashboard.png)
+
 ## Commands
 
 | Command | What it does |
